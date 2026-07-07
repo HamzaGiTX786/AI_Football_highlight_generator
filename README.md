@@ -4,9 +4,6 @@ Turn a full football (soccer) match video into a concatenated highlight reel aut
 
 The pipeline samples frames with ffmpeg, asks a multi-modal LLM (Claude in the cloud, or Qwen2.5-VL / LLaVA through Ollama locally) to identify notable events, curates them with importance-based filtering and temporal deduplication, then cuts and concatenates the result into one MP4.
 
-> Resume blurb:
-> AI Football Highlight Generator - End-to-end Python pipeline that takes a full-length football match video and produces a concatenated highlight reel. Combines ffmpeg-based frame sampling with multi-modal LLM reasoning for event detection, and uses importance scoring with temporal deduplication for curation. Supports cloud (Claude API) and local (Ollama) backends.
-
 ## Why This Is Interesting
 
 - Multi-modal AI: real vision-language reasoning, not keyword matching.
