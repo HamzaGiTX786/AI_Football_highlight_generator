@@ -50,23 +50,26 @@ class ClaudeBackend(VisionBackend):
                 "or use --backend ollama for a free local model."
             )
         # Import locally so the dependency is optional at import time
-        from anthropic import Anthropic
+        from anthropic import APIError, Anthropic
 
         self._client = Anthropic(api_key=api_key)
         self._model = model
+        self._api_error = APIError
 
     def detect(self, batch: FrameBatch) -> list[Event]:
-        content: list[dict[str, Any]] = [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": _png_to_b64(f.path),
-                },
-            }
-            for f in batch.frames
-        ]
+        content: list[dict[str, Any]] = []
+        for frame in batch.frames:
+            image_data, media_type = _image_to_b64_and_media_type(frame.path)
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": image_data,
+                    },
+                }
+            )
         content.append(
             {
                 "type": "text",
@@ -80,12 +83,20 @@ class ClaudeBackend(VisionBackend):
             }
         )
 
-        response = self._client.messages.create(
-            model=self._model,
-            max_tokens=2048,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
-        )
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=2048,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": content}],
+            )
+        except self._api_error as exc:
+            if exc.__class__.__name__ == "RequestTooLargeError":
+                raise DetectorError(
+                    "Claude rejected this batch because the images are too large. "
+                    "Try --frames-per-batch 8, --frame-width 480, or --fps 0.25."
+                ) from exc
+            raise DetectorError(f"Claude request failed: {exc}") from exc
 
         text = _extract_text(response)
         return _parse_events_json(text, batch)
@@ -105,7 +116,7 @@ class OllamaBackend(VisionBackend):
         self._client = httpx.Client(timeout=300.0)
 
     def detect(self, batch: FrameBatch) -> list[Event]:
-        images_b64 = [_png_to_b64(f.path) for f in batch.frames]
+        images_b64 = [_image_to_b64_and_media_type(f.path)[0] for f in batch.frames]
         prompt = (
             SYSTEM_PROMPT
             + "\n\n"
@@ -145,10 +156,21 @@ class OllamaBackend(VisionBackend):
 # ---------------------------------------------------------------------------
 
 
-def _png_to_b64(path: str | None) -> str:
+def _image_to_b64_and_media_type(path: str | None) -> tuple[str, str]:
     if not path:
         raise DetectorError("Frame has no on-disk path; cannot encode.")
-    return base64.standard_b64encode(Path(path).read_bytes()).decode("ascii")
+    image_path = Path(path)
+    suffix = image_path.suffix.lower()
+    media_type = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(suffix)
+    if media_type is None:
+        raise DetectorError(f"Unsupported frame image type: {suffix or '(none)'}")
+    data = base64.standard_b64encode(image_path.read_bytes()).decode("ascii")
+    return data, media_type
 
 
 def _frame_timestamp_block(batch: FrameBatch) -> str:
@@ -174,20 +196,14 @@ def _extract_text(response: Any) -> str:
 
 def _parse_events_json(text: str, batch: FrameBatch) -> list[Event]:
     """Robustly extract the events array from a possibly chatty LLM response."""
-    # Try direct JSON parse first
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # Try to find a JSON object in the response
-        m = re.search(r"\{[\s\S]*\}", text)
-        if not m:
-            raise DetectorError(f"Could not parse JSON from LLM response:\n{text[:500]}")
+    for candidate in _json_candidates(text):
         try:
-            data = json.loads(m.group(0))
-        except json.JSONDecodeError as exc:
-            raise DetectorError(
-                f"Could not parse JSON from LLM response:\n{text[:500]}"
-            ) from exc
+            data = json.loads(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+    else:
+        raise DetectorError(f"Could not parse JSON from LLM response:\n{text[:500]}")
 
     if isinstance(data, list):
         raw_events = data
@@ -207,6 +223,59 @@ def _parse_events_json(text: str, batch: FrameBatch) -> list[Event]:
             print(f"  [warn] skipped malformed event: {exc}")
             continue
     return events
+
+
+def _json_candidates(text: str) -> list[str]:
+    """Return likely complete JSON snippets from a model response."""
+    candidates = [text.strip()]
+
+    fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+    candidates.extend(snippet.strip() for snippet in fenced)
+
+    candidates.extend(_balanced_json_snippets(text, "{", "}"))
+    candidates.extend(_balanced_json_snippets(text, "[", "]"))
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            unique.append(candidate)
+    return unique
+
+
+def _balanced_json_snippets(text: str, opener: str, closer: str) -> list[str]:
+    """Extract complete top-level JSON-looking snippets without greedy regex."""
+    snippets: list[str] = []
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i, char in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if char == "\\" and in_string:
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+
+        if char == opener:
+            if depth == 0:
+                start = i
+            depth += 1
+        elif char == closer and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                snippets.append(text[start : i + 1])
+                start = None
+
+    return snippets
 
 
 def _coerce_event(raw: dict[str, Any], batch: FrameBatch) -> Event | None:

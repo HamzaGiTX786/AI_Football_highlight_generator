@@ -46,14 +46,20 @@ def sample_frames(
     video_path: str | Path,
     fps: float = 0.5,
     output_dir: str | Path | None = None,
+    frame_width: int = 640,
+    jpeg_quality: int = 4,
 ) -> list[FrameSample]:
     """
     Sample frames from a video at a given rate.
 
-    Returns a list of FrameSample with timestamp + path to a PNG on disk.
+    Returns a list of FrameSample with timestamp + path to a JPEG on disk.
     """
     if fps <= 0:
         raise ValueError("fps must be positive")
+    if frame_width <= 0:
+        raise ValueError("frame_width must be positive")
+    if not 2 <= jpeg_quality <= 31:
+        raise ValueError("jpeg_quality must be between 2 and 31")
 
     _ensure_ffmpeg()
     video_path = Path(video_path)
@@ -65,21 +71,22 @@ def sample_frames(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use a fixed naming pattern: frame_000001.png, frame_000002.png, ...
-    pattern = output_dir / "frame_%06d.png"
+    # JPEG keeps vision requests small enough for cloud API limits.
+    pattern = output_dir / "frame_%06d.jpg"
 
     cmd = [
         "ffmpeg",
-        "-y",                       # overwrite
+        "-y",
         "-i", str(video_path),
-        "-vf", f"fps={fps}",
+        "-vf", f"fps={fps},scale='min({frame_width},iw)':-2",
+        "-q:v", str(jpeg_quality),
         "-loglevel", "error",
         str(pattern),
     ]
     subprocess.run(cmd, check=True)
 
     # List resulting files in sorted order; derive timestamps from index.
-    files = sorted(output_dir.glob("frame_*.png"))
+    files = sorted(output_dir.glob("frame_*.jpg"))
     interval = 1.0 / fps
     samples = [
         FrameSample(timestamp=round(i * interval, 3), path=str(p))

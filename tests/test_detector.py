@@ -64,6 +64,45 @@ def test_parse_events_json_bare_array() -> None:
     assert events[0].importance == 4
 
 
+def test_parse_events_json_uses_first_complete_fenced_block() -> None:
+    batch = FrameBatch(
+        start=1280,
+        end=1310,
+        frames=[
+            FrameSample(timestamp=1280, path="frame_1.png"),
+            FrameSample(timestamp=1310, path="frame_2.png"),
+        ],
+    )
+    response = """
+    ```json
+    {
+      "events": [
+        {
+          "timestamp": 1351,
+          "event_type": "controversial",
+          "importance": 3,
+          "description": "Possible handball near the touchline.",
+          "players": ["11", "3"],
+          "teams": ["Barcelona", "Real Madrid"]
+        }
+      ]
+    }
+    ```
+
+    Wait, let me recalibrate. The frame timestamps are 1280-1310s.
+
+    ```json
+    {
+      "events": [
+    """
+
+    events = _parse_events_json(response, batch)
+
+    assert len(events) == 1
+    assert events[0].event_type is EventType.CONTROVERSIAL
+    assert events[0].timestamp == 1310
+
+
 def test_parse_events_json_rejects_non_json() -> None:
     with pytest.raises(DetectorError):
         _parse_events_json("No events here.", _batch())
