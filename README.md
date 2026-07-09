@@ -181,4 +181,4 @@ Planned v2 ideas:
 
 ## License
 
-MIT - see `LICENSE`.
+GPT 3.0 - see `LICENSE`.
