@@ -181,4 +181,4 @@ Planned v2 ideas:
 
 ## License
 
-GPT 3.0 - see `LICENSE`.
+GPL 3.0 - see `LICENSE`.
